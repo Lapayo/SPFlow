@@ -7,6 +7,7 @@ import numpy as np
 import collections
 from collections import deque, OrderedDict
 import logging
+from joblib import Parallel, delayed
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,9 @@ def bfs(root, func):
                     queue.append(c)
 
 
-def get_topological_order(node):
+# generates layer-wise topological list of nodes
+# nodes between bounds can be processed parallel, as they have no dependecy on each other 
+def get_topological_order(node, return_bounds=False):
     nodes = get_nodes_by_type(node)
 
     parents = OrderedDict({node: []})
@@ -240,12 +243,13 @@ def get_topological_order(node):
                 in_degree[n] += 1
 
     S = deque()  # Set of all nodes with no incoming edge
+    S_next = deque()
     for u in in_degree:
         if in_degree[u] == 0:
             S.appendleft(u)
 
     L = []  # Empty list that will contain the sorted elements
-
+    bounds = [] #  Empty list that will contain the layer bounds
     while S:
         n = S.pop()  # remove a node n from S
         L.append(n)  # add n to tail of L
@@ -254,10 +258,23 @@ def get_topological_order(node):
             in_degree_m = in_degree[m] - 1  # remove edge e from the graph
             in_degree[m] = in_degree_m
             if in_degree_m == 0:  # if m has no other incoming edges then
-                S.appendleft(m)  # insert m into S
+                S_next.appendleft(m)  # insert m into S
+        
+        # if S is empty swap S to process next layer
+        if not S:
+            tmp = S
+            S = S_next
+            S_next = tmp
+
+            if return_bounds:
+                bounds.append(len(L))
 
     assert len(L) == len(nodes), "Graph is not DAG, it has at least one cycle"
-    return L
+
+    if return_bounds:
+        return L, bounds
+    else:
+        return L
 
 
 def get_nodes_by_type(node, ntype=Node):
@@ -369,6 +386,135 @@ def eval_spn_bottom_up(node, eval_functions, all_results=None, debug=False, **ar
 
     return all_results[node]
 
+
+
+def eval_node(n, args, all_results):
+    try:
+        func = n.__class__._eval_func[-1]
+        n_is_leaf = n.__class__._is_leaf
+    except:
+        if isinstance(n, Leaf) and leaf_func is not None:
+            func = leaf_func
+            n_is_leaf = True
+        else:
+            raise AssertionError("No lambda function associated with type: %s" % (n.__class__.__name__))
+
+    if n_is_leaf:
+        result = func(n, **args)
+    else:
+        len_children = len(n.children)
+        tmp_children_list = [None] * len_children
+        
+        for i in range(len_children):
+            ci = n.children[i]
+            tmp_children_list[i] = all_results[ci]
+        result = func(n, tmp_children_list[0:len_children], **args)
+
+    all_results[n] = result
+
+import time
+import multiprocessing
+
+def eval_spn_bottom_up_parallel(node, eval_functions, all_results=None, **args):
+
+    nodes, bounds = get_topological_order(node, return_bounds=True)
+
+    # all_results = {}
+    all_results = multiprocessing.Manager().dict({})
+    # all_results = multiprocessing.Manager().dict()
+
+    for node_type, func in eval_functions.items():
+        if "_eval_func" not in node_type.__dict__:
+            node_type._eval_func = []
+        node_type._eval_func.append(func)
+        node_type._is_leaf = issubclass(node_type, Leaf)
+    leaf_func = eval_functions.get(Leaf, None)
+
+    tmp_children_list = []
+    len_tmp_children_list = 0
+
+    prev_bound = 0
+    
+    def eval_node_internal(n, task):
+        func, n_is_leaf = task
+
+        if n_is_leaf:
+            result = func(n, **args)
+        else:
+            len_children = len(n.children)
+            tmp_children_list = [None] * len_children
+            
+            for i in range(len_children):
+                ci = n.children[i]
+                # tmp_children_list[i] = 0.0
+                tmp_children_list[i] = all_results[ci]
+            result = func(n, tmp_children_list[0:len_children], **args)
+
+        # all_results[n] = result
+        return result
+    
+    def eval_nodes_internal(ns):
+        for n in ns:
+            eval_node_internal(n)
+
+    # with Parallel(n_jobs=2, require='sharedmem') as parallel:
+    with Parallel(n_jobs=2) as parallel:
+
+        for next_bound in bounds:
+
+            next_nodes = nodes[prev_bound:next_bound]
+            tasks = [(n.__class__._eval_func[-1], n.__class__._is_leaf) for n in next_nodes]
+
+            print("Starting parallel")
+            start_t = time.time()
+            # print(len([delayed(eval_node_internal)(node) for node in next_nodes]))
+            results = parallel(delayed(eval_node_internal)(n, tasks[i]) for i, n in enumerate(next_nodes))
+            # results = parallel(delayed(eval_nodes_internal)(next_nodes) for i in range(1))
+            print("finished parallel", (time.time() - start_t))
+
+            for result, n in zip(results, next_nodes):
+                all_results[n] = result
+
+            # print(all_results)
+
+            prev_bound = next_bound
+
+    for node_type, func in eval_functions.items():
+        del node_type._eval_func[-1]
+        if len(node_type._eval_func) == 0:
+            delattr(node_type, "_eval_func")
+
+    return all_results[node]
+
+            # results = list(results)
+
+            # for i, n in enumerate(next_nodes):
+            #     all_results[n] = results[i]
+        # else:
+        #     for n in next_nodes:
+        #         try:
+        #             func = n.__class__._eval_func[-1]
+        #             n_is_leaf = n.__class__._is_leaf
+        #         except:
+        #             if isinstance(n, Leaf) and leaf_func is not None:
+        #                 func = leaf_func
+        #                 n_is_leaf = True
+        #             else:
+        #                 raise AssertionError("No lambda function associated with type: %s" % (n.__class__.__name__))
+
+        #         if n_is_leaf:
+        #             result = func(n, **args)
+        #         else:
+        #             len_children = len(n.children)
+        #             if len_tmp_children_list < len_children:
+        #                 tmp_children_list.extend([None] * len_children)
+        #                 len_tmp_children_list = len(tmp_children_list)
+        #             for i in range(len_children):
+        #                 ci = n.children[i]
+        #                 tmp_children_list[i] = all_results[ci]
+        #             result = func(n, tmp_children_list[0:len_children], **args)
+
+        #         all_results[n] = result
 
 def eval_spn_top_down(root, eval_functions, all_results=None, parent_result=None, **args):
     """

@@ -7,7 +7,7 @@ import logging
 import numpy as np
 from scipy.special import logsumexp
 
-from spn.structure.Base import Product, Sum, eval_spn_bottom_up
+from spn.structure.Base import Product, Sum, eval_spn_bottom_up, eval_spn_bottom_up_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,17 @@ def log_likelihood(
 ):
     return likelihood(node, data, dtype=dtype, node_likelihood=node_log_likelihood, lls_matrix=lls_matrix, debug=debug)
 
+
+def log_likelihood_parallel(node, data, dtype=np.float64, node_likelihood=_node_log_likelihood, lls_matrix=None):
+    all_results = {}
+
+    result = eval_spn_bottom_up_parallel(node, node_likelihood, all_results=all_results, dtype=dtype, data=data)
+
+    if lls_matrix is not None:
+        for n, ll in all_results.items():
+            lls_matrix[:, n.id] = ll[:, 0]
+
+    return result
 
 def conditional_log_likelihood(node_joint, node_marginal, data, log_space=True, dtype=np.float64):
     result = log_likelihood(node_joint, data, dtype) - log_likelihood(node_marginal, data, dtype)
