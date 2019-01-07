@@ -95,14 +95,37 @@ def get_split_rows_Gower(n_clusters=2, pre_proc=None, seed=17):
 
     return split_rows_Gower
 
-def get_split_rows_GMM(n_clusters=2, pre_proc=None, ohe=False, seed=17, max_iter=100, n_init=2, covariance_type='full'):
+def get_split_rows_GMM(n_clusters=2, pre_proc=None, ohe=False, seed=17, max_iter=100, n_init=2, covariance_type='full',
+    max_estimation_clusters=10, min_estimation_improvement=0.0):
     """
     covariance_type can be one of 'spherical', 'diag', 'tied', 'full'
     """
     def split_rows_GMM(local_data, ds_context, scope):
         data = preproc(local_data, ds_context, pre_proc, ohe)
 
-        estimator = GaussianMixture(n_components=n_clusters, covariance_type=covariance_type, max_iter=max_iter, n_init=n_init, random_state=seed)
+        if n_clusters > 0:
+            estimator = GaussianMixture(n_components=n_clusters, covariance_type=covariance_type, max_iter=max_iter, n_init=n_init, random_state=seed)
+        else:
+            # simple estimation of components number:
+            best_score = -np.inf
+            best_estimator = None
+            for i in range(2, max_estimation_clusters + 1):
+                estimator = GaussianMixture(n_components=i, covariance_type=covariance_type, max_iter=max_iter, n_init=n_init, random_state=seed)
+                estimator.fit(data)
+                # prior: −λC|V|
+                score = estimator.score(data) - 0.8 * i * data.shape[1]
+
+                if score - best_score < min_estimation_improvement:
+                    # break and use last estimator if we did not improve the likelihood
+                    # of the data using more clusters
+                    estimator = best_estimator
+                    break
+
+                best_score = score
+                best_estimator = estimator
+
+            print("Using {} clusters".format(i - 1))
+
 
         clusters = estimator.fit(data).predict(data)
 
